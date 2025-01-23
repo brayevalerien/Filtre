@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import torch
 import clip
+from aesthetic_predictor_v2_5 import convert_v2_5_from_siglip
 from PIL import Image
 from yaspin import yaspin
 from yaspin.spinners import Spinners
@@ -31,6 +32,12 @@ def get_args():
         type=int,
         help="Maximum number of faces that have to be in the images. This is useful to remove group photos for instance. Set to None to keep the number of faces unbounded.",
         default=None,
+    )
+    parser.add_argument(
+        "--keep_similar",
+        type=bool,
+        help="If enabled, the similarity filter (that removes images that look the same) is disabled.",
+        default=False,
     )
     return parser.parse_args()
 
@@ -220,7 +227,7 @@ def save_images(
         str: path of the newly created directory, containing the images.
     """
     parent_dir, original_name = os.path.split(original_directory.rstrip(os.sep))
-    filtered_directory = os.path.join(parent_dir, f"{original_name}_filtered")
+    filtered_directory = os.path.join(parent_dir, f"{original_name}_{appendix}")
     os.makedirs(filtered_directory, exist_ok=True)
     for i, image in enumerate(images):
         image_to_save = (image * 255).astype(np.uint8)
@@ -252,7 +259,8 @@ if __name__ == "__main__":
             images = filter_by_faces(images, args.min_faces, args.max_faces)
         faces_sp.ok("✓")
 
-    images = filter_by_similarity(images)
+    if not args.keep_similar:
+        images = filter_by_similarity(images)
 
     with yaspin(Spinners.dots, text="Saving filtered images, DOT NOT EXIT!") as save_sp:
         filtered_dataset = save_images(args.path, images)
