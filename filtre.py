@@ -251,14 +251,18 @@ def sort_by_aesthetic(images: list[np.ndarray], batch_size: int = 1) -> list[flo
     )
     model = model.to(torch.bfloat16).to(DEVICE)
 
-    # compute scores batch by batch
-    scores = []
-    for i in range(0, len(images_pil) // batch_size - 1):
-        batch = images_pil[i * batch_size : i * batch_size + batch_size]
-        scores += run_inference_batched(batch, model, preprocess)
-    if len(images_pil) % batch_size != 0:
-        inputs = images_pil[(i + 1) * batch_size + batch_size :]  # remaining images
-        scores += run_inference_batched(inputs, model, preprocess)
+    if len(images_pil) < batch_size:
+        # only a single batch needs to be processed
+        scores = run_inference_batched(images_pil, model, preprocess)
+    else:
+        # compute scores batch by batch
+        scores = []
+        for i in range(0, len(images_pil) // batch_size - 1):
+            batch = images_pil[i * batch_size : i * batch_size + batch_size]
+            scores += run_inference_batched(batch, model, preprocess)
+        if len(images_pil) % batch_size != 0:
+            inputs = images_pil[(i + 1) * batch_size + batch_size :]  # remaining images
+            scores += run_inference_batched(inputs, model, preprocess)
 
     scores = map(float, scores)
     sorted_images = [
