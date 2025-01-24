@@ -1,14 +1,18 @@
 import argparse
 import os
 
+import clip
 import cv2
 import numpy as np
 import torch
-import clip
 from aesthetic_predictor_v2_5 import convert_v2_5_from_siglip
 from PIL import Image
 from yaspin import yaspin
 from yaspin.spinners import Spinners
+
+from utils import np_to_pil
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def get_args():
@@ -37,6 +41,12 @@ def get_args():
         "--keep_similar",
         type=bool,
         help="If enabled, the similarity filter (that removes images that look the same) is disabled.",
+        default=False,
+    )
+    parser.add_argument(
+        "--ignore_aesthetic",
+        type=bool,
+        help="If enabled, the images won't be sorted by decreasing aesthetic score. This skips the aesthetic score prediction, which greatly reduces runtime, so use that if you don't need aesthetic storting.",
         default=False,
     )
     return parser.parse_args()
@@ -137,8 +147,7 @@ def filter_by_similarity(
         list[np.ndarray]: list of filtered images.
     """
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = clip.load("ViT-B/32", device=device)
+    model, preprocess = clip.load("ViT-B/32", device=DEVICE)
 
     def compute_embedding(image: np.ndarray) -> np.ndarray:
         """
@@ -151,7 +160,7 @@ def filter_by_similarity(
                     image = np.uint8(np.clip(image * 255, 0, 255))
 
             pil_image = Image.fromarray(image)
-            image_input = preprocess(pil_image).unsqueeze(0).to(device)
+            image_input = preprocess(pil_image).unsqueeze(0).to(DEVICE)
 
             with torch.no_grad():
                 embedding = model.encode_image(image_input).cpu().numpy()
@@ -212,6 +221,53 @@ def filter_by_similarity(
     return result
 
 
+def sort_by_aesthetic(images: list[np.ndarray], batch_size: int = 1) -> list[float]:
+    """
+    Sorts a list of images according to an aesthetic score. This aesthetic score is estimated by the aesthetic predictor v2.5.
+
+    Args:
+        images (list[np.ndarray]): the list of the images that need to be sorted.
+        batch_size (int): size of batches for model inference. Bigger batch size means more VRAM used, but can improve the inference speed. If len(images) is not divisible by the batch size, the remaining images will be processed together in a smaller batch. Defaults to 1 (no batched processing).
+
+    Returns:
+        list[np.ndarray]: list of images sorted by aesthetic score.
+    """
+    if not len(images):
+        return []
+
+    def run_inference_batched(batch: list, model, preprocessor) -> list[float]:
+        inputs = preprocessor(batch, return_tensors="pt")
+        inputs = inputs.pixel_values.to(torch.bfloat16).to(DEVICE)
+        with torch.inference_mode():
+            outputs = model(inputs).logits.squeeze().float().cpu().numpy()
+        return list(outputs)
+
+    # convert all images to PIL format
+    images_pil = [np_to_pil(image) for image in images]
+
+    # load the model once
+    model, preprocess = convert_v2_5_from_siglip(
+        low_cpu_mem_usage=True, trust_remote_code=True
+    )
+    model = model.to(torch.bfloat16).to(DEVICE)
+
+    # compute scores batch by batch
+    scores = []
+    for i in range(0, len(images_pil) // batch_size - 1):
+        batch = images_pil[i * batch_size : i * batch_size + batch_size]
+        scores += run_inference_batched(batch, model, preprocess)
+    if len(images_pil) % batch_size != 0:
+        inputs = images_pil[(i + 1) * batch_size + batch_size :]  # remaining images
+        scores += run_inference_batched(inputs, model, preprocess)
+
+    scores = map(float, scores)
+    sorted_images = [
+        image
+        for image, _ in sorted(zip(images, scores), key=lambda x: x[1], reverse=True)
+    ]
+    return sorted_images
+
+
 def save_images(
     original_directory: str, images: list[np.ndarray], appendix: str = "_filtered"
 ) -> str:
@@ -226,8 +282,8 @@ def save_images(
     Returns:
         str: path of the newly created directory, containing the images.
     """
-    parent_dir, original_name = os.path.split(original_directory.rstrip(os.sep))
-    filtered_directory = os.path.join(parent_dir, f"{original_name}_{appendix}")
+    parent_dir, original_name = os.path.split(original_directory.rstrip(os.sep + "/"))
+    filtered_directory = os.path.join(parent_dir, f"{original_name}{appendix}")
     os.makedirs(filtered_directory, exist_ok=True)
     for i, image in enumerate(images):
         image_to_save = (image * 255).astype(np.uint8)
@@ -261,6 +317,13 @@ if __name__ == "__main__":
 
     if not args.keep_similar:
         images = filter_by_similarity(images)
+
+    if not args.ignore_aesthetic:
+        with yaspin(
+            Spinners.dots, text="Sorting images by aesthetic score"
+        ) as aesthetic_sp:
+            images = sort_by_aesthetic(images, batch_size=64)
+        aesthetic_sp.ok("✓")
 
     with yaspin(Spinners.dots, text="Saving filtered images, DOT NOT EXIT!") as save_sp:
         filtered_dataset = save_images(args.path, images)
